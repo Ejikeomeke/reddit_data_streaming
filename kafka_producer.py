@@ -11,7 +11,7 @@ def stream_data(data):
                 break
             try:
 
-                producer.send('omekedata', json.dumps(raw_data).encode('utf-8'))
+                producer.send('omekedata', json.dumps(data).encode('utf-8'))
             except Exception as e:
                 logging.error(f'An error occured: {e}')
                 continue
