@@ -1,0 +1,144 @@
+version: '3.8'
+
+x-airflow-common:
+  &airflow-common
+  image: apache/airflow:2.9.2
+  environment:
+    &airflow-common-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__CORE__SQL_ALCHEMY_CONN: "postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres/${POSTGRES_DB}"
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
+    AIRFLOW__API__AUTH_BACKENDS: 'airflow.api.auth.backend.basic_auth'
+    _PIP_ADDITIONAL_REQUIREMENTS: ""
+  volumes:
+    - ./dags:/opt/airflow/dags
+    - ./logs:/opt/airflow/logs
+    - ./plugins:/opt/airflow/plugins
+    - ./requirements.txt:/opt/airflow/requirements.txt
+  user: "${AIRFLOW_UID}:0"
+  depends_on:
+    - postgres
+
+services:
+  postgres:
+    image: postgres:13
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    ports:
+      - "${POSTGRES_PORT}:5432"
+
+
+  airflow-webserver:
+    <<: *airflow-common
+    command: webserver
+    ports:
+      - "${AIRFLOW_PORT}:8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+
+  airflow-init:
+    <<: *airflow-common
+    command: bash -c "airflow db migrate && airflow users create \
+      --username admin \
+      --password admin \
+      --firstname Admin \
+      --lastname User \
+      --role Admin \
+      --email admin@example.com"   
+
+  zookeeper:
+      image: confluentinc/cp-zookeeper:7.4.0
+      hostname: zookeeper
+      container_name: zookeeper
+      ports:
+        - "2181:2181"
+      environment:
+        ZOOKEEPER_CLIENT_PORT: 2181
+        ZOOKEEPER_TICK_TIME: 2000
+      healthcheck:
+        test: ['CMD', 'bash', '-c', "echo 'ruok' | nc localhost 2181"]
+        interval: 10s
+        timeout: 5s
+        retries: 5
+      networks:
+        - erudite
+
+  broker:
+      image: confluentinc/cp-server:7.4.0
+      hostname: broker
+      container_name: broker
+      depends_on:
+        zookeeper:
+          condition: service_healthy
+      ports:
+        - "9092:9092"
+        - "9101:9101"
+      environment:
+        KAFKA_BROKER_ID: 1
+        KAFKA_ZOOKEEPER_CONNECT: 'zookeeper:2181'
+        KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+        KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://broker:29092,PLAINTEXT_HOST://localhost:9092
+        KAFKA_METRIC_REPORTERS: io.confluent.metrics.reporter.ConfluentMetricsReporter
+        KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+        KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+        KAFKA_CONFLUENT_LICENSE_TOPIC_REPLICATION_FACTOR: 1
+        KAFKA_CONFLUENT_BALANCER_TOPIC_REPLICATION_FACTOR: 1
+        KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+        KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+        KAFKA_JMX_PORT: 9101
+        KAFKA_JMX_HOSTNAME: localhost
+        KAFKA_CONFLUENT_SCHEMA_REGISTRY_URL: http://schema-registry:8081
+        CONFLUENT_METRICS_REPORTER_BOOTSTRAP_SERVERS: broker:29092
+        CONFLUENT_METRICS_REPORTER_TOPIC_REPLICAS: 1
+        CONFLUENT_METRICS_ENABLE: 'false'
+        CONFLUENT_SUPPORT_CUSTOMER_ID: 'anonymous'
+      networks:
+        - erudite
+      healthcheck:
+        test: [ "CMD", "bash", "-c", 'nc -z localhost 9092' ]
+        interval: 10s
+        timeout: 5s
+        retries: 5
+
+  spark-master:
+    image: bitnami/spark:latest
+    command: bin/spark-class org.apache.spark.deploy.master.Master
+    ports:
+      - "9090:8080"
+      - "7077:7077"
+    networks:
+      - erudite
+  spark-worker:
+    image: bitnami/spark:latest
+    command: bin/spark-class org.apache.spark.deploy.worker.Worker spark://spark-master:7077
+    depends_on:
+      - spark-master
+    environment:
+      SPARK_MODE: worker
+      SPARK_WORKER_CORES: 2
+      SPARK_WORKER_MEMORY: 1g
+      SPARK_MASTER_URL: spark://spark-master:7077
+    networks:
+      - erudite
+
+  mongodb:
+    image: bitnami/mongodb:latest
+    ports: 
+      - '27017:27017'
+    environment:
+      MONGODB_ROOT_USER: omeke
+      MONGODB_ROOT_PASSWORD: password
+    depends_on:
+      - spark-worker
+
+networks:
+  erudite:
